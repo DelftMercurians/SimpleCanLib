@@ -1,4 +1,6 @@
 
+// #include "driver/twai.h"
+
 /*
 
     Portable CAN bus library - implementation for STM B-G431B-ESC1 board.
@@ -13,7 +15,7 @@
 	(c) 2022 Christian Schmidmer, use is subject to MIT license
 */
 
-#include <arduino.h>
+#include <Arduino.h>
 #ifdef USE_LOGLIB
 	#include "Logging.h"
 #else
@@ -21,23 +23,30 @@
 	#define PrintLog    Serial.printf
 #endif
 
-// #define _ESP32_
 
-#if defined(_ESP32_)
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32)
+	#include "freertos/FreeRTOS.h"
+	#include "freertos/queue.h"
+	#include "ThreadSafeQueue.h"
+	#include "esp_intr_alloc.h"       
+#endif
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+	#include "soc/system_reg.h"
+	#define ETS_CAN_INTR_SOURCE	37		// Not provided by framework for S3...
+#endif
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "ThreadSafeQueue.h"
+#if defined(CONFIG_IDF_TARGET_ESP32)
+	#include "soc/dport_reg.h"
+#endif
 
-#include "esp_intr_alloc.h"       
-#include "soc/dport_reg.h"
+ 
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32)
+
 #include <math.h>
-
 #include "driver/gpio.h"
-
 #include "ESP32_CAN_regdef.h"
-#include "SimpleCan.h"
+#include "SimpleCAN.h"
 
 
 static  void CAN_isr(void *arg_p);
@@ -47,8 +56,8 @@ class RxHandlerESP32 : public RxHandlerBase
 	public:
 		// Note: The constructor here is a must in order to initialize the base class. 
 		RxHandlerESP32(uint16_t dataLength) : RxHandlerBase(dataLength) {};
-		 bool CANReadFrame(SimpleCanRxHeader* SCHeader, uint8_t* pData, int MaxDataLen);
-		 void ReleaseRcvBuffer();
+		bool CANReadFrame(SimpleCanRxHeader* SCHeader, uint8_t* pData, int MaxDataLen);
+		void ReleaseRcvBuffer();
 };
 
 
@@ -124,7 +133,7 @@ class SimpleCan_ESP32_DevC : public SimpleCan
 {
 	public:
 
-		SimpleCan_ESP32_DevC(gpio_num_t _TxPin=GPIO_NUM_5, gpio_num_t _RxPin=GPIO_NUM_35);
+		SimpleCan_ESP32_DevC(uint32_t _TxPin, uint32_t _RxPin);
 
 		//*******************************************************
 		//*** Implementation of pure virtual methods ************
@@ -227,6 +236,27 @@ static  void CAN_isr(void *arg_p)
     // Read interrupt status and clear flags
 	// Reading this clears the flags???
     uint32_t interrupt = MODULE_CAN->IR.U;
+	uint8_t ECCReg = MODULE_CAN->ECC.B.ECC;
+	Can1RxHandler.RxErrorFlag=ECCReg;
+	bool InvalidTx=false;
+
+    // Handle error interrupts.
+    if (interrupt & (__CAN_IRQ_ERR						//0x4
+                      | __CAN_IRQ_DATA_OVERRUN			//0x8
+                      | __CAN_IRQ_WAKEUP				//0x10
+                      | __CAN_IRQ_ERR_PASSIVE			//0x20 v
+                      | __CAN_IRQ_ARB_LOST				//0x40 v
+                      | __CAN_IRQ_BUS_ERR)				//0x80 v
+	)
+	{
+		// PrintLnLog("e");
+    	/*Error handler*/
+		SimpleCan_ESP32_DevC::CANBusErrors++;
+		if ((ECCReg & 0xE) == 0xC)
+			Can1RxHandler.RxErrorFlag = true; // Skip TX frame? 
+		if ((ECCReg & 0xE) == 0xE)
+			Can1RxHandler.RxErrorFlag = true; // Skip RX frame? 
+    }
 
     // Handle TX complete interrupt
     if (interrupt & __CAN_IRQ_TX) 
@@ -257,20 +287,6 @@ static  void CAN_isr(void *arg_p)
 		PrintLnLog("CAN ERROR: __CAN_IRQ_WAKEUP");
 #endif
 
-    // Handle error interrupts.
-    if (interrupt & (__CAN_IRQ_ERR						//0x4
-                      | __CAN_IRQ_DATA_OVERRUN			//0x8
-                      | __CAN_IRQ_WAKEUP				//0x10
-                      | __CAN_IRQ_ERR_PASSIVE			//0x20 v
-                      | __CAN_IRQ_ARB_LOST				//0x40 v
-                      | __CAN_IRQ_BUS_ERR)				//0x80 v
-	)
-	{
-		// PrintLnLog("e");
-    	/*Error handler*/
-		SimpleCan_ESP32_DevC::CANBusErrors++;
-    }
-
 	
     // Handle RX frame available interrupt
 	// Check this last, because it reads the interrupt status register repeatedly, which will clear all other IRQs.
@@ -278,22 +294,23 @@ static  void CAN_isr(void *arg_p)
     {
 		// Serial.print("r");
 		EmptyRxFifo();
-		return;
 	}
 
+	if (SimpleCan_ESP32_DevC::RxHandlerP)
+		SimpleCan_ESP32_DevC::RxHandlerP->CANBusACtivityDetected();
 }
 
 
-
-SimpleCan* CreateCanLib()
+SimpleCan* CreateCanLib(uint32_t TxPin, uint32_t RxPin)
 {
-	return (SimpleCan*) new SimpleCan_ESP32_DevC;
+	return (SimpleCan*) new SimpleCan_ESP32_DevC(TxPin, RxPin);
 }
 
-SimpleCan_ESP32_DevC::SimpleCan_ESP32_DevC(gpio_num_t _TxPin, gpio_num_t _RxPin)
+
+SimpleCan_ESP32_DevC::SimpleCan_ESP32_DevC(uint32_t _TxPin, uint32_t _RxPin) : SimpleCan(_TxPin, _RxPin)
 {
-    RxPin = _RxPin;
-    TxPin = _TxPin;
+    RxPin = (gpio_num_t)_RxPin;
+    TxPin = (gpio_num_t)_TxPin;
 	
 	SendIDFilterFunc = 0;
 	CANBusErrors = 0;
@@ -336,24 +353,39 @@ SCCanStatus __attribute__((optimize("O0"))) SimpleCan_ESP32_DevC::Init(SCCanSpee
 	//Time quantum
 	double __tq;
 
-    //enable module
-    DPORT_SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG, DPORT_CAN_CLK_EN);
-    DPORT_CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_CAN_RST);
+	#if defined(CONFIG_IDF_TARGET_ESP32S3) 
+		// S3 variant
+		// Enable module
+		REG_SET_FIELD(SYSTEM_PERIP_CLK_EN0_REG, SYSTEM_TWAI_CLK_EN, 1);
+		REG_SET_FIELD(SYSTEM_PERIP_RST_EN0_REG, SYSTEM_TWAI_RST, 0);
+	#endif
+	
 
-    //configure TX pin
-    gpio_set_level(TxPin, 1);
-    gpio_set_direction(TxPin,GPIO_MODE_OUTPUT);
-    gpio_matrix_out(TxPin,CAN_TX_IDX,0,0);
-    gpio_pad_select_gpio(TxPin);
+	#if defined(CONFIG_IDF_TARGET_ESP32)
+		// Older ESP32s 
+		// Enable module
+		DPORT_SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG, DPORT_CAN_CLK_EN);
+		DPORT_CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_CAN_RST);
+	#endif
 
-    //configure RX pin
+
+	// Configure TX pin
+	gpio_set_level(TxPin, 1);
+	gpio_set_direction(TxPin,GPIO_MODE_OUTPUT);
+	gpio_matrix_out(TxPin,CAN_TX_IDX,0,0);
+	gpio_pad_select_gpio(TxPin);
+
+	// Configure RX pin
 	gpio_set_direction(RxPin,GPIO_MODE_INPUT);
 	gpio_matrix_in(RxPin,CAN_RX_IDX,0);
 	gpio_pad_select_gpio(RxPin);
 
+#if defined(CONFIG_IDF_TARGET_ESP32)
     //set to PELICAN mode
 	// MODULE_CAN->CDR.B.CAN_M=0x1;			// 0=Basic CAN, 1=PeliCAN
+	// NOTE: This bit is not available on the S3 variant!
 	HAL_FORCE_MODIFY_U32_REG_FIELD(MODULE_CAN->CDR, B.CAN_M, 0x1)
+#endif
 
 	//synchronization jump width is the same for all baud rates
 	// MODULE_CAN->BTR0.B.SJW		=0x1;
@@ -668,9 +700,6 @@ int SimpleCan_ESP32_DevC::GetOtherErrors()
 	return CANBusErrors;
 }
 
-
-#define PrintStatusBit(Value, Text)  
-
 SCCanStatus SimpleCan_ESP32_DevC::GetStatus(uint32_t* Status, char* Str) 
 {
 	if (Status)
@@ -688,6 +717,10 @@ SCCanStatus SimpleCan_ESP32_DevC::GetStatus(uint32_t* Status, char* Str)
 		strcat(Str, MODULE_CAN->SR.B.TBS?" TBS":" ---");
 		strcat(Str, MODULE_CAN->SR.B.DOS?" DOS":" ---");
 		strcat(Str, MODULE_CAN->SR.B.RBS?" RBS":" ---");
+		
+		char Str2[16];
+		sprintf(Str2, " ECC=0x%u", MODULE_CAN->ECC.B.ECC);
+		strcat(Str, Str2);
 	}
 	
 	return CAN_OK;

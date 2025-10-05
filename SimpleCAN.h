@@ -22,21 +22,17 @@
 */
 
 #pragma once
-#include "arduino.h"
+#include "Arduino.h"
 
 #define RX_QUEUE_SIZE	16
 #define TX_QUEUE_SIZE	16
 
-#if !defined _STM32_DEF_ && !defined _ESP32_
-	// Depending on the board you compile this for, define one (!) of the following two.
-	// For platformio this should be one of the -D options in the platformio.ini file. This section
-	// is for Arduino only and not required on pülatformio.
-
-	// #define _STM32_DEF_
-	// #define _ESP32_
+#if !defined STM32G4xx && !defined ESP32
+	// Depending on the board you compile this for, one of the above defines must be defined.
+	// Typically, these are predefined by the Arduino/platformio environment.
 #endif
 
-#if defined(_ESP32_)
+#if defined(ESP32)
 	#include "freertos/FreeRTOS.h"
 	#include "freertos/queue.h"
 #endif
@@ -169,10 +165,40 @@ class CANTxMessage
 class CanRxMessage
 {
 	public:
+		CanRxMessage() : Error(false) {};
 		SimpleCanRxHeader SCHeader;
 		uint8_t Data[8];
+		uint8_t Error;
 };
 
+
+
+//--------------------------------------------------------------------------------------
+// A simpke helper since digoitalToggle() was not available on the ESP32S3.
+class ToggleLED
+{
+	public:
+		ToggleLED() {LEDState=false;};
+
+		void SetPin(uint8_t PinNum)
+		{
+			LEDPinNum = PinNum;
+			pinMode(PinNum, OUTPUT);
+		};
+
+		void Toggle()
+		{
+			if (LEDState)
+				digitalWrite(LEDPinNum, 0);
+			else
+				digitalWrite(LEDPinNum, 1);
+			LEDState = !LEDState;
+		};
+
+	private:
+		bool LEDState;
+		uint8_t LEDPinNum;
+};
 
 
 //--------------------------------------------------------------------------------------
@@ -183,7 +209,7 @@ class CanRxMessage
 // Callback function which should be user supplied and which will be called for each
 // incomming message which passes the filters.
 // The void* is exactly the value which was set as userData when calling ActivateNotification().
-typedef void(*RxCallback)(SimpleCanRxHeader rxHeader, uint8_t *rxData, void* userData);
+typedef void(*RxCallback)(const SimpleCanRxHeader rxHeader, const uint8_t *rxData, void* userData);
 
 
 // Platform specific implementations must also provide one class derived from RxHandlerBase
@@ -204,11 +230,17 @@ class RxHandlerBase
 		// Called whenever a frame was read and CANReadFrame() finished or the frame can be discarded otherwise.
 		// Used to signal the hardware that the frame data are not required anymore.
 		virtual void ReleaseRcvBuffer()=0;
+
+		// Called whenever there is activity detected on the CAN bus (frames received / transmitted).
+		// The default implementation just blinks a LED if enabled, but may be overloaded by a board specific version.
+		// Note: This may be before filtering! 
+		virtual void CANBusACtivityDetected();
 		
 		bool Loop();
 
 		uint8_t *_rxData;
 		uint16_t _rxDataLength;
+		uint8_t RxErrorFlag;
 };
 
 
@@ -219,6 +251,8 @@ typedef bool (*CanIDFilter) (int CanID);
 class SimpleCan 
 {
 	public:
+		SimpleCan(uint32_t PinTx, uint32_t PinRx) : DoNotSend(false), DoNotReceive(false) {};
+
 		//*************************************************************************************
 		//*** Pure virtual methods, which require hardware specific implementation ************
 		
@@ -286,15 +320,32 @@ class SimpleCan
 		#define MAX_STATUS_STR_LEN 64
 		virtual SCCanStatus GetStatus(uint32_t* Status, char* Str) {return CAN_UNSUPPORTED;};
 
+		//Disable/enable sending of messages. Helpful for debugging and to avoid buffer overruns.
+		void DisableTx() {DoNotSend=true;};
+		void EnableTx () {DoNotSend=false;};
+
+		//Disable/enable receiving of messages. Helpful for debugging and to avoid buffer overruns.
+		void DisableRx() {DoNotReceive=true;};
+		void EnableRx () {DoNotReceive=false;};
+
+		// Enable/Disable blinking on CAN bus activity.
+		void DisableBlinkOnActivity();
+		void EnableBlinkOnActivity (uint8_t LEDPinNum);
 
 		static SafeQueue<CanRxMessage> RxQueue;
 		static SafeQueue<CANTxMessage> TxQueue;
+		static bool BlinkOnActivity;
+		static ToggleLED LED;
+
+	private:
+		bool DoNotSend;
+		bool DoNotReceive;
 };
 
 
 // Class factory which creates a SimpleCan object for the correct platform.
 // There must be exactly one such function available.
-SimpleCan* CreateCanLib();
+SimpleCan* CreateCanLib(uint32_t PinTx, uint32_t PinRx);
 
 
 //*******************************************************************************************************
@@ -309,15 +360,15 @@ class SimpleCANProfile
 {
     public:
 		// This is, where you finaly receive the CAN messages in your own code!
-        virtual void HandleCanMessage(SimpleCanRxHeader rxHeader, uint8_t *rxData)=0;
+        virtual void HandleCanMessage(const SimpleCanRxHeader rxHeader, const uint8_t *rxData)=0;
 
         SimpleCANProfile(SimpleCan* pCan);
         virtual void  Init(CanIDFilter IDFilterFunc=0);
-        virtual void  CANSendText(const char* Text, int CanID);
-        virtual void  CANSendFloat(float Val1, int CanID);
-        virtual void  CANSendFloat(float Val1, float Val2, int CanID);
-        virtual void  CANSendInt(int32_t Val, int CanID);
-		virtual void  CANSendInt(int32_t Val1, int32_t Val2, int CanID);
+        virtual void  CANSendText(const char* Text, const int CanID);
+        virtual void  CANSendFloat(const float Val1, const int CanID);
+        virtual void  CANSendFloat(const float Val1, const float Val2, const int CanID);
+        virtual void  CANSendInt(const int32_t Val, const int CanID);
+		virtual void  CANSendInt(const int32_t Val1, const int32_t Val2, const int CanID);
         virtual float CANGetFloat(const uint8_t* pData);
         virtual int   CANGetInt(const uint8_t* pData);
 		virtual void  CANGetInt(const uint8_t* pData, int32_t* pInt1, int32_t* pInt2);

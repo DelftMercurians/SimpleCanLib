@@ -6,12 +6,16 @@
     (c) 2022 Christian Schmidmer, use is subject to MIT license
 */
 
-#include <arduino.h>
+#include <Arduino.h>
 #include "SimpleCAN.h"
 
 
 SafeQueue<CanRxMessage> SimpleCan::RxQueue(RX_QUEUE_SIZE);
 SafeQueue<CANTxMessage> SimpleCan::TxQueue(TX_QUEUE_SIZE);
+bool SimpleCan::BlinkOnActivity=false;
+ToggleLED SimpleCan::LED;
+
+
 
 // Set a filter to accept all incoming messages
 SCCanStatus SimpleCan::AcceptAllMessages()
@@ -50,6 +54,9 @@ bool SimpleCan::SendMessage(const uint8_t* pData, int NumBytes, int CanID, bool 
 	// Skip command if sender ID is disabled.
 	// if (SendIDFilterFunc && !SendIDFilterFunc(CanID)) return true; 
 
+	// Skip sending if disabled.
+	if (DoNotSend) return true;
+
 	// Serial.printf("CAN: Queueing message with ID 0x%x, %d messages in TX queue.\n", CanID, TxQueue.NumElements);
 
 	CANTxMessage Msg;
@@ -85,6 +92,9 @@ bool SimpleCan::RequestMessage(int NumBytes, int CanID, bool UseEFF)
 	// Skip command if sender ID is disabled.
 	// if (SendIDFilterFunc && !SendIDFilterFunc(CanID)) return true; 
 
+	// Skip sending if disabled.
+	if (DoNotSend) return true;
+
 	// PrintLog("CAN: Queueing RTR message with ID 0x%x, %d messages in TX queue.\n", CanID, TxQueue.NumElements);
 
 	CANTxMessage Msg;
@@ -109,6 +119,16 @@ bool SimpleCan::RequestMessage(int NumBytes, int CanID, bool UseEFF)
 	return true;
 }
 
+void SimpleCan::DisableBlinkOnActivity() 
+{
+	BlinkOnActivity=false;
+};
+
+void SimpleCan::EnableBlinkOnActivity(uint8_t LEDPinNum) 
+{
+	LED.SetPin(LEDPinNum);
+	BlinkOnActivity=true;
+};
 
 //***********************************************************************
 //***********************************************************************
@@ -116,7 +136,7 @@ bool SimpleCan::RequestMessage(int NumBytes, int CanID, bool UseEFF)
 // Profile starts here
 
 // This is the message hadler for the profile!
-static  void HandleCanMessage(SimpleCanRxHeader rxHeader, uint8_t *rxData, void* userData)
+static  void HandleCanMessage(const SimpleCanRxHeader rxHeader, const uint8_t *rxData, void* userData)
 {
     SimpleCANProfile* pClass = (SimpleCANProfile*)userData;
     pClass->HandleCanMessage(rxHeader, rxData);
@@ -150,19 +170,19 @@ void SimpleCANProfile::Init(CanIDFilter IDFilterFunc)
 }
 
 
-void SimpleCANProfile::CANSendText(const char* Text, int CanID)
+void SimpleCANProfile::CANSendText(const char* Text, const int CanID)
 {
 	Can1->SendMessage((uint8_t*)Text,  strlen(Text), CanID);
 }
 
 
-void SimpleCANProfile::CANSendFloat(float Val, int CanID)
+void SimpleCANProfile::CANSendFloat(const float Val, const int CanID)
 {
 	Can1->SendMessage((uint8_t*)&Val,  sizeof(Val), CanID);
 }
 
 
-void SimpleCANProfile::CANSendFloat(float Val1, float Val2, int CanID)
+void SimpleCANProfile::CANSendFloat(const float Val1, const float Val2, const int CanID)
 {
     uint8_t Buffer[2*sizeof(float)];
     memcpy(Buffer, &Val1, sizeof(float));
@@ -171,13 +191,13 @@ void SimpleCANProfile::CANSendFloat(float Val1, float Val2, int CanID)
 }
 
 
-void SimpleCANProfile::CANSendInt(int32_t Val, int CanID)
+void SimpleCANProfile::CANSendInt(const int32_t Val, const int CanID)
 {
 	Can1->SendMessage((uint8_t*)&Val,  sizeof(int), CanID);
 }
 
 
-void SimpleCANProfile::CANSendInt(int32_t Val1, int32_t Val2, int CanID)
+void SimpleCANProfile::CANSendInt(const int32_t Val1, const int32_t Val2, const int CanID)
 {
     uint8_t Buffer[2*sizeof(int32_t)];
     memcpy(Buffer, &Val1, sizeof(int32_t));
@@ -225,7 +245,7 @@ void SimpleCANProfile::CANGetFloat(const uint8_t* pData, float* pVal1, float* pV
 
 
 //--------------------------------------------------------------------------------------
-// Implementation of the basic recieve handler, which is common for all platforms
+// Implementation of the basic recerive handler, which is common for all platforms
 
 RxHandlerBase::RxHandlerBase(uint16_t dataLength)
 {
@@ -260,14 +280,19 @@ void RxHandlerBase::Notify(/*...*/)
 		Serial.println("Error returned from ReadFrame!");
 		delay(100);
 	}
-
     // Let the hardware know the frame has been read.
 	ReleaseRcvBuffer();
 
+	Msg.Error = RxErrorFlag;
 	if (SimpleCan::RxQueue.NumElements<16)
 		SimpleCan::RxQueue.Enqueue(Msg);
 }
 
+void RxHandlerBase::CANBusACtivityDetected()
+{
+	if (SimpleCan::BlinkOnActivity)
+		SimpleCan::LED.Toggle();
+}
 
 bool RxHandlerBase::Loop()
 {
@@ -277,10 +302,11 @@ bool RxHandlerBase::Loop()
 	if (ProfileCallback != NULL)
 	{
 		CanRxMessage Msg;
- 		if (SimpleCan::RxQueue.Dequeue(&Msg))
+ 		if (1 && SimpleCan::RxQueue.Dequeue(&Msg))
 		{
 			// Serial.println("Read message from buffer");
 			// --- Convert the header and call the user provided RX handler.
+			if (Msg.Error) Serial.println("Dequeue msg with error");
 			ProfileCallback(Msg.SCHeader, Msg.Data, ProfileClass);
 		}
 	}

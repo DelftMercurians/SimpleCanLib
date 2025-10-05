@@ -2,7 +2,22 @@
 
 ## Introduction
 
-SimpleCAN is library intended to run on MCUs with integrated CAN controller. It is intended to separate the low level, MCU specific code from the actual application. You can define "CAN profiles" which use the same code on different MCUs and you can have an ESP32 communicate with an STM32 CPU, both compiling the same code, just using platform specific versions of this library. The library has so far been tested on ESP32 Devkit 4 boards fro AZDelivery and the STM32 dev board B-G431B-ESC1 from STM. 
+SimpleCAN is library intended to run on MCUs with integrated CAN controller. It is intended to separate the low level, MCU specific code from the actual application. You can define "CAN profiles" which use the same code on different MCUs and you can have an ESP32 communicate with an STM32 CPU, both compiling the same code, just using platform specific versions of this library. The library has so far been tested on ESP32 Devkit 4 boards from AZDelivery and the STM32 dev board B-G431B-ESC1 from STM as well as self developed STM32G431B and ESP32-S3 based boards. 
+
+## Releases
+
+### V0.1.0
+- Support for ESP32-S3 variant
+- EnableBlinkOnActivity(L) now requires specification of the pin on which the LED is connected 
+- No more special build flags are required in platformio.ini. Comopilation now relies on the defines 
+    - CONFIG_IDF_TARGET_ESP32S3  (ESP32 S3 variant)
+    - CONFIG_IDF_TARGET_ESP32    (ESP32)
+    - STM32G4xx (STM32G431 MCUs)
+
+ In Addition, the demo program uses the following board definitions (you may not need them...):
+    - ARDUINO_B_G431B_ESC1
+    - ARDUINO_PT_SENSOR
+
 
 ## What you should know before reading
 
@@ -24,10 +39,11 @@ CAN bus as such is completely ignorant of any application layer. It only defines
 6. If serial monitor is connected to one of the two boards, you should see reports of incoming and sent messages.
 
 
-## How it works
-At the basis is the class SimpleCan (SimpleCan.h), which defines an interface for all platform specific implementations. Through this interface all low level communication is handled. If you ever derive your own platform specific class from this interface, make sure that all routines are thread safe and do not expose any Interupt service routines (which aren't thread safe...). For the ESP32 and STM32 implementations, thread safe queues are used to accomplish this.
 
-On top of the low level routines sits the CAN profile. The base class for application specific profiles is always SimpleCANProfile (SimpleCan.h). The low level SimpleCan derived object is a member of this class. SimpleCANProfile provides functions for sending basic data types over the CAN bus and it contains an abstract handler SimpleCANProfile::HandleCanMessage() for incomming messages, which must be implemented by your own profile class.
+## How it works
+At the basis is the class SimpleCan (SimpleCAN.h), which defines an interface for all platform specific implementations. Through this interface all low level communication is handled. If you ever derive your own platform specific class from this interface, make sure that all routines are thread safe and do not expose any Interupt service routines (which aren't thread safe...). For the ESP32 and STM32 implementations, thread safe queues are used to accomplish this.
+
+On top of the low level routines sits the CAN profile. The base class for application specific profiles is always SimpleCANProfile (SimpleCAN.h). The low level SimpleCan derived object is a member of this class. SimpleCANProfile provides functions for sending basic data types over the CAN bus and it contains an abstract handler SimpleCANProfile::HandleCanMessage() for incomming messages, which must be implemented by your own profile class.
 
 The example profile CANPingPong is derived from SimpleCANProfile and shows how to do this. As you can see, depending on the CAN ID, the implementation for HandleCanMessage() simply dispatches messages to other functions which are defined by an abstract class PingPongNotificationsFromCAN. A pointer to a class derived from PingPongNotificationsFromCAN is passed to the constructor of CANPingPong.
 
@@ -195,16 +211,23 @@ class RxFromCAN : public PingPongNotificationsFromCAN
 ````
 
 
-It is time now to create some objects which allow us to use the CAN bus. What we need is simply an instance of our broker class and an instance of the profile class. It goes like this:
+It is time now to create some objects which allow us to use the CAN bus. What we need is simply an instance of our broker class and an instance of the profile class. Note that you have to adjust the Tx/Rx pin names according to your needs! It goes like this:
 ````
+// A *unique* ID for each device on the CAN bus.
+int MyDeviceID=3;
+
 // Instantiation of the class which receives messages from the CAN bus.
 // This class depends on your application!
 RxFromCAN CANBroker;
 
 // The actual CAN bus class, which handles all communication.
-CANPingPong CANDevice(CreateCanLib(), &CANBroker);
+// Insert the correct pin names here!
+CANPingPong CANDevice(CreateCanLib(A_CAN_TX, A_CAN_RX), &CANBroker);
 
 ````
+In the above code make sure that your ID is really unique for all devices on the CAN bus. Also note that the total length of CAN IDs must not exceed 11 bits!
+The example code uses a simple macro to combine the device specific ID with the message IDs from the profile. 
+
 These two objects can now be used in our setup and loop functions. In setup() we initialize SimipleCAN. If we activate the bus termination here as well depends on your bus topology and wether your device supports enabling/disabling bus termination by software (B-G431B-ESC1 does, ESP32 typically does not).
 ````
 void setup() 
@@ -238,12 +261,12 @@ void loop()
 
 	if (CANBroker.ReceivedID==CANID_PP_PING  || (LastAction+5000<millis()) )
 	{
-		CANDevice.CANSendText("Pong", CANID_PP_PONG);
+		CANDevice.CANSendText("Pong", PP_MAKE_CAN_ID(MyDeviceID, CANID_PP_PONG));
 		LastAction=millis();
 	}
 	else if (CANBroker.ReceivedID==CANID_PP_PONG)
 	{
-		CANDevice.CANSendText("Ping", CANID_PP_PING);
+		CANDevice.CANSendText("Ping", PP_MAKE_CAN_ID(MyDeviceID, CANID_PP_PING));
 		LastAction=millis();
 	}
 
@@ -254,11 +277,11 @@ void loop()
 }
 ````
 
-That's it! It looks far more complicated that it actually is. If you follow this tutorial step by step, it is really easy since all the required functions are very basic. You don't need to deal with anything CAN specific anymore, just focus on your own application. Most of the code presented here is directly taken from the PinPong example in the examples folder of the library, but a bit simplified. The example handles more messages than just "Ping" and "Pong" and it also demonstrates how to use RTR frames. 
+That's it! It looks far more complicated than it actually is. If you follow this tutorial step by step, it is really easy since all the required functions are very basic. You don't need to deal with anything CAN specific anymore, just focus on your own application. Most of the code presented here is directly taken from the PinPong example in the examples folder of the library, but a bit simplified. The example handles more messages than just "Ping" and "Pong" and it also demonstrates how to use RTR frames. 
 
 
-### Float values in messages sent across different platforms
-The binary representation of floating point numbers is machine and compiler specific. Most compilers today use IEEE number formats, so the main issue when exchanging float numbers between different CPUs will be the byte order. Luckily, STM32 and ESP32 use exactly te same single precision float format, so the can be simply send as four bytes. For other CPUs, this is not necessarily the case and numbers may need to be packed differently.
+### Float values in messages sent across CAN bus between different platforms
+The binary representation of floating point numbers is machine and compiler specific. Most compilers today use IEEE number formats, so the main issue when exchanging float numbers between different CPUs in binary form will be the byte order. Luckily, STM32 and ESP32 use exactly the same single precision float format, so they can simply be sent as four bytes. For other CPUs, this is not necessarily the case and numbers may need to be packed differently.
 
 ### STM32 specific
 For RTR frames to work you need to apply the following patch to the Arduino STM32 framework:
@@ -292,7 +315,7 @@ Line 3493:
 ````
 
 ## Limitations
-For the sake of platfom independence, the SimpleCAN supports the least common denomoinator between ESP32 and STM32 only at the moment. This means for example, no FDCAN and very simple filters only (oh, good point, I haven't covered filters in my description yet, but, maybe I'll wait for them to become more elaborate...). Of course, you cannot expect SimpleCAN to implement something, which the underlying hardware does not support (e.g. bus termination).
+For the sake of platfom independence, the SimpleCAN library supports the least common denominator between ESP32 and STM32 only at the moment. This means for example, no FDCAN and very simple filters only (oh, good point, I haven't covered filters in my description yet, but, maybe I'll wait for them to become more elaborate...). Of course, you cannot expect SimpleCAN to implement something, which the underlying hardware does not support (e.g. bus termination).
 
 
 ## License
